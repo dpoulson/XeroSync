@@ -8,9 +8,96 @@ class Xero_API_Manager {
     const TOKEN_OPTION_KEY = 'xero_oauth_tokens';
     const VERIFIER_OPTION_KEY = 'xero_pkce_verifier';
     const CLIENT_ID_KEY = 'xero_client_id';
+    
+    // Encryption constants and properties
+    private $encryption_key;
+    const ENCRYPTION_CIPHER = 'aes-256-cbc';
 
     public function __construct() {
-        // Dependencies are now retrieved dynamically from options and admin context.
+        
+        $raw_key = '';
+        
+        // 1. Primary choice: Dedicated encryption key (Recommended)
+        if ( defined( 'XERO_ENCRYPTION_KEY' ) ) {
+            $raw_key = XERO_ENCRYPTION_KEY;
+        } 
+        // 2. Secondary choice: Fallback to a WordPress security salt
+        else if ( defined( 'AUTH_KEY' ) ) {
+            $raw_key = AUTH_KEY;
+            // This log message helps you know which key is being used
+            error_log('Xero API Manager: Using AUTH_KEY as encryption key fallback. Defining XERO_ENCRYPTION_KEY is recommended.');
+        } 
+        // 3. Fallback: Hardcoded (Unsafe for Production)
+        else {
+            $raw_key = 'A_SECURE_32_BYTE_ENCRYPTION_KEY_1234'; 
+            error_log('SECURITY ERROR: Xero API encryption key is hardcoded. Define XERO_ENCRYPTION_KEY or AUTH_KEY.');
+        }
+        
+        // Generate a 32-byte (256-bit) key from the raw key material using SHA-256 hash.
+        // This ensures the key is the correct length for aes-256-cbc.
+        $this->encryption_key = substr( hash( 'sha256', $raw_key, true ), 0, 32 );
+        
+    }
+    
+    /**
+     * Encrypts and serializes data for storage.
+     * @param mixed $data The data (string or array) to encrypt.
+     * @return string|false JSON encoded string containing encrypted data and IV, or false on failure.
+     */
+    private function encrypt_and_save( $data ) {
+        $serialized_data = is_array( $data ) ? serialize( $data ) : (string) $data;
+        $iv_length = openssl_cipher_iv_length( self::ENCRYPTION_CIPHER );
+        $iv = openssl_random_pseudo_bytes( $iv_length );
+
+        $encrypted = openssl_encrypt( $serialized_data, self::ENCRYPTION_CIPHER, $this->encryption_key, 0, $iv );
+
+        if ( $encrypted === false ) {
+            return false;
+        }
+
+        $json = json_encode([
+            'data' => base64_encode( $encrypted ),
+            'iv'   => base64_encode( $iv ),
+        ]);
+
+        return $json;
+    }
+
+    /**
+     * Decrypts and unserializes data retrieved from storage.
+     * @param string $json_data The JSON encoded string from encrypt_and_save.
+     * @return mixed|false The decrypted and unserialized data (string or array) or false on failure.
+     */
+    private function retrieve_and_decrypt( $json_data ) {
+        if ( empty( $json_data ) ) {
+            return false;
+        }
+
+        $data = json_decode( $json_data, true );
+
+        if ( ! $data || ! isset( $data['data'], $data['iv'] ) ) {
+            // This handles cases where data might not be encrypted yet or is malformed
+            return $json_data; 
+        }
+
+        $iv = base64_decode( $data['iv'] );
+        $encrypted_data = base64_decode( $data['data'] );
+
+        $decrypted_data = openssl_decrypt( $encrypted_data, self::ENCRYPTION_CIPHER, $this->encryption_key, 0, $iv );
+
+        if ( $decrypted_data === false ) {
+            return false;
+        }
+
+        // Attempt to unserialize the data.
+        $unserialized = @unserialize( $decrypted_data );
+
+        // Check for serialized 'false' (b:0;)
+        if ( $unserialized !== false || $decrypted_data === 'b:0;' ) {
+            return $unserialized;
+        }
+
+        return $decrypted_data; // Return as string if not serialized
     }
 
     /**
@@ -21,8 +108,8 @@ class Xero_API_Manager {
         $verifier = bin2hex( random_bytes( 32 ) ); // Generate a random 64-char string (32 bytes * 2)
         $challenge = rtrim( strtr( base64_encode( hash( 'sha256', $verifier, true ) ), '+/', '-_' ), '=' );
 
-        // Store the verifier for later use during code exchange
-        update_option( self::VERIFIER_OPTION_KEY, $verifier );
+        // Store the ENCRYPTED verifier for later use during code exchange
+        update_option( self::VERIFIER_OPTION_KEY, $this->encrypt_and_save( $verifier ) );
 
         return [
             'verifier' => $verifier,
@@ -67,10 +154,11 @@ class Xero_API_Manager {
      */
     public function handle_oauth_redirect( $code, $redirect_uri ) {
         $client_id = get_option( self::CLIENT_ID_KEY );
-        $code_verifier = get_option( self::VERIFIER_OPTION_KEY );
+        // Retrieve and DECRYPT the verifier
+        $code_verifier = $this->retrieve_and_decrypt( get_option( self::VERIFIER_OPTION_KEY ) );
 
         if ( empty( $client_id ) || empty( $code_verifier ) ) {
-            error_log( 'Xero OAuth Error: Client ID or PKCE verifier missing.' );
+            error_log( 'Xero OAuth Error: Client ID or PKCE verifier missing/could not be decrypted.' );
             return false;
         }
 
@@ -96,7 +184,8 @@ class Xero_API_Manager {
 
         if ( isset( $data['access_token'] ) ) {
             $data['expires_at'] = time() + $data['expires_in'];
-            update_option( self::TOKEN_OPTION_KEY, $data );
+            // ENCRYPT and store the tokens array
+            update_option( self::TOKEN_OPTION_KEY, $this->encrypt_and_save( $data ) );
 
             // Fetch tenant ID
             return $this->fetch_tenant_id( $data['access_token'] );
@@ -143,11 +232,12 @@ class Xero_API_Manager {
      * @return string|false Valid access token or false on failure.
      */
     public function get_valid_access_token() {
-        $tokens = get_option( self::TOKEN_OPTION_KEY );
+        // Retrieve and DECRYPT the tokens array
+        $tokens = $this->retrieve_and_decrypt( get_option( self::TOKEN_OPTION_KEY ) );
         $client_id = get_option( self::CLIENT_ID_KEY );
 
         if ( empty( $tokens ) || empty( $client_id ) ) {
-            return false; // Not configured or not connected
+            return false; // Not configured or not connected, or decryption failed
         }
 
         // Check if token is still valid
@@ -181,7 +271,9 @@ class Xero_API_Manager {
 
         if ( isset( $data['access_token'] ) ) {
             $data['expires_at'] = time() + $data['expires_in'];
-            update_option( self::TOKEN_OPTION_KEY, array_merge( $tokens, $data ) );
+            // Merge updated data and ENCRYPT the entire array before saving
+            $new_tokens = array_merge( $tokens, $data );
+            update_option( self::TOKEN_OPTION_KEY, $this->encrypt_and_save( $new_tokens ) );
             return $data['access_token'];
         }
 
