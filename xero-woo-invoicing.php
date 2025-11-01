@@ -3,10 +3,12 @@
  * Plugin Name: Xero WooCommerce Invoicing Connector
  * Description: Automatically creates and registers paid invoices in Xero upon WooCommerce order completion.
  * Version: 1.0.0
- * Author: Your Name
- * Requires at least: 5.0
+ * Author: We Make Things 
+ * Author URI: https://www.we-make-things.co.uk/
+ * License: GPL-2.0+
+ * Requires at least: 6.0
  * Tested up to: 6.6
- * WC requires at least: 4.0
+ * WC requires at least: 6.0
  * WC tested up to: 8.8
  */
 

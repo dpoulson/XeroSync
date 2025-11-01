@@ -24,8 +24,6 @@ class Xero_API_Manager {
         // 2. Secondary choice: Fallback to a WordPress security salt
         else if ( defined( 'AUTH_KEY' ) ) {
             $raw_key = AUTH_KEY;
-            // This log message helps you know which key is being used
-            error_log('Xero API Manager: Using AUTH_KEY as encryption key fallback. Defining XERO_ENCRYPTION_KEY is recommended.');
         } 
         // 3. Fallback: Hardcoded (Unsafe for Production)
         else {
@@ -251,6 +249,8 @@ class Xero_API_Manager {
             return false;
         }
 
+        error_log( 'Refreshing Xero Token' );
+
         $token_url = 'https://identity.xero.com/connect/token';
         $response = wp_remote_post( $token_url, [
             'headers' => [ 'Content-Type' => 'application/x-www-form-urlencoded' ],
@@ -260,6 +260,8 @@ class Xero_API_Manager {
                 'client_id'     => $client_id,
             ],
         ]);
+
+
 
         if ( is_wp_error( $response ) ) {
             error_log( 'Xero Token Refresh API Error: ' . $response->get_error_message() );
@@ -425,9 +427,48 @@ class Xero_API_Manager {
         }
     }
 
+    /**
+     * Helper to format WooCommerce address fields into Xero Address structure.
+     * @param WC_Order $order
+     * @param string $type 'billing' or 'shipping'
+     * @param string $xero_type 'STREET' or 'POBOX'
+     * @return array Xero Address array (for the Addresses collection).
+     */
+    private function format_address_for_xero( $order, $type, $xero_type ) {
+        // Use WC_Order methods to safely retrieve address fields.
+        $address_1 = $order->{"get_{$type}_address_1"}();
+        $address_2 = $order->{"get_{$type}_address_2"}();
+        $city      = $order->{"get_{$type}_city"}();
+        $state     = $order->{"get_{$type}_state"}();
+        $postcode  = $order->{"get_{$type}_postcode"}();
+        $country   = $order->{"get_{$type}_country"}();
+
+        // Only include address if at least one primary field is present
+        if ( empty( $address_1 ) && empty( $city ) ) {
+            return [];
+        }
+
+        $address_lines = array_filter( [ $address_1, $address_2 ] );
+        
+        // Xero requires AddressLine1-4. WooCommerce generally uses 2 lines.
+        // We will map the available lines.
+        $xero_address = [
+            'AddressType'   => $xero_type, 
+            'AddressLine1'  => $address_lines[0] ?? null,
+            'AddressLine2'  => $address_lines[1] ?? null,
+            // Line 3 and 4 are often unused in standard WC checkout
+            'City'          => $city,
+            'Region'        => $state,
+            'PostalCode'    => $postcode,
+            'Country'       => $country,
+        ];
+        
+        // Filter out null or empty values for clean API payload
+        return array_filter( $xero_address ); 
+    }
 
     /**
-     * Extracts contact details from the WC_Order for Xero Contact matching/creation.
+     * Extracts contact details (including addresses) from the WC_Order for Xero Contact matching/creation.
      * @param WC_Order $order
      * @return array|false Xero Contact detail array or false.
      */
@@ -437,20 +478,56 @@ class Xero_API_Manager {
         $email = $order->get_billing_email();
         $contact_name = trim( $first_name . ' ' . $last_name );
 
-        // Ensure we always have a contact name, falling back to email or a default for guests
+        // Fallback for contact name
         if ( empty( $contact_name ) ) {
              $contact_name = $email ?: 'Guest Checkout Customer WOO-' . $order->get_id();
         }
 
-        // Ensure we have an email address
+        // Fallback for email address
         if ( empty( $email ) ) {
             $email = 'unknown-' . $order->get_id() . '@example.com';
         }
-
-        return [
-            'Name' => $contact_name,
+        
+        // Retrieve and format the addresses
+        $billing_address = $this->format_address_for_xero( $order, 'billing', 'STREET' );
+        $shipping_address = $this->format_address_for_xero( $order, 'shipping', 'STREET' );
+        
+        $contact_data = [
+            // Ensure first and last name are separate fields for better Xero matching
+            'FirstName'    => $first_name, 
+            'LastName'     => $last_name,
+            'Name'         => $contact_name,
             'EmailAddress' => $email,
+            'Addresses'    => [],
         ];
+        
+        // Add Billing Address
+        if ( ! empty( $billing_address ) ) {
+            // Note: Xero uses Type STREET for a physical/primary address
+            $contact_data['Addresses'][] = array_merge( $billing_address, [ 'AddressType' => 'STREET' ] );
+        }
+
+        // Add Shipping Address (only if it's different from billing or billing wasn't present)
+        // We use the same 'STREET' type, Xero will recognize it as a second address.
+        if ( ! empty( $shipping_address ) && $billing_address != $shipping_address ) {
+            $contact_data['Addresses'][] = array_merge( $shipping_address, [ 'AddressType' => 'STREET' ] );
+        }
+        
+        // Also include a Phone Number if available (Xero Contact optional fields)
+        $phone_number = $order->get_billing_phone();
+        if ( ! empty( $phone_number ) ) {
+            $contact_data['Phones'][] = [
+                'PhoneType'  => 'DEFAULT', // or 'MOBILE', 'FAX', 'DDI'
+                'PhoneNumber' => $phone_number,
+            ];
+        }
+
+        // If no addresses were added, remove the empty key from the final contact data
+        if ( empty( $contact_data['Addresses'] ) ) {
+            unset( $contact_data['Addresses'] );
+        }
+
+        return $contact_data;
     }
     
     /**
@@ -603,10 +680,39 @@ class Xero_API_Manager {
             'DueDate'       => date('Y-m-d', $order->get_date_created()->getTimestamp()),
             'LineItems'     => $line_items,
             'Status'        => 'AUTHORISED', // Create as awaiting payment
-            'Reference'     => 'WOO-' . $order->get_id(),
+            'Reference'     => $order->get_id(),
+            'InvoiceNumber' => $order->get_order_number(),
             'LineAmountTypes' => 'Exclusive', 
         ];
 
+        $shipping_address_1 = $order->get_shipping_address_1();
+        $shipping_city = $order->get_shipping_city();
+
+        // Only proceed if we have a primary shipping address or city
+        if ( ! empty( $shipping_address_1 ) || ! empty( $shipping_city ) ) {
+            
+            $delivery_address = [
+                // Required Xero fields for DeliveryAddress object
+                'AttentionTo'  => trim( $order->get_shipping_first_name() . ' ' . $order->get_shipping_last_name() ),
+                'AddressLine1' => $shipping_address_1,
+                'AddressLine2' => $order->get_shipping_address_2(),
+                'City'         => $shipping_city,
+                'Region'       => $order->get_shipping_state(),
+                'PostalCode'   => $order->get_shipping_postcode(),
+                'Country'      => $order->get_shipping_country(),
+            ];
+
+            // Use array_filter to remove null or empty strings, ensuring only populated fields are sent.
+            // This is crucial as Xero can reject objects with empty fields if they are mandatory or unexpected.
+            $invoice_data['DeliveryAddress'] = array_filter( $delivery_address );
+
+            // If the filter removes AttentionTo (e.g., if no name), Xero may complain. 
+            // We ensure it falls back to the Contact Name if shipping name is empty.
+            if ( empty( $invoice_data['DeliveryAddress']['AttentionTo'] ) ) {
+                 $invoice_data['DeliveryAddress']['AttentionTo'] = $contact_data['Name'];
+            }
+        }
+        error_log( 'XERO INVOICE PAYLOAD DEBUG: ' . print_r( $invoice_data['DeliveryAddress'], true ) );
         // 2. Create Invoice
         $invoice_response = $this->xero_api_request( 'POST', 'Invoices', $access_token, $tenant_id, [ 'Invoices' => [ $invoice_data ] ] );
 
