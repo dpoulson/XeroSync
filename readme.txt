@@ -33,15 +33,22 @@ This plugin automatically handles the creation of invoices in Xero as soon as a 
 1.  Upload the entire `xero-woocommerce-invoicing-connector` folder to the `/wp-content/plugins/` directory.
 2.  Activate the plugin through the 'Plugins' menu in WordPress.
 
-### 2. Configuration (Essential)
+### 2. Configuration
 
-1.  Navigate to the new **Xero Connector** settings page under the WooCommerce menu.
-2.  Follow the on-screen prompts to connect your Xero account using OAuth 2.0.
-3.  Configure the essential settings, including:
-    * The default **Sales Account** and **Tracking Categories** in Xero.
-    * The WooCommerce order statuses that trigger the invoice creation (e.g., 'Completed').
-    * Tax rate mapping between WooCommerce and Xero.
-4.  Save your settings. The connector is now active and will sync new orders automatically.
+1.  Navigate to the woocommerce->Xero Invoicing settings page.
+2.  Make a note of the redirect URI shown
+3.  You will need a Xero App. 
+3a.  Log into the Xero developers portal: https://developer.xero.com/
+3b.  Click on New App and give it a suitable name (<mystore> sync)
+3c.  Select mobile or desktop app, put in your store website, and the redirect uri from step 2. Read the terms and conditions, and click Create App
+3d.  Go to the configuration page, and you can grab the client ID
+4.  Add the client ID on the Xero Invoicing settings page and press save changes
+5.  Click on Connect to Xero App, select the org you want to connect to, and click connect.
+6.  You can now set the default sales account code, and the mapping for payment methods to bank accounts.
+
+== Usage
+
+At this point, its all configured and whenever an order moves to 'Completed', then it will be synced to Xero. If the product isn't in xero it will be created (matched on SKU), as will the customer. It will automatically be marked as paid, and assigned to the correct bank account, depending on your mappings.
 
 == Frequently Asked Questions ==
 
@@ -53,12 +60,6 @@ The plugin logs all successful and failed synchronization attempts. You can find
 
 = Can I choose which organisation in Xero to connect to? =
 Yes, during the initial OAuth setup, you will be prompted to select the specific Xero organisation you wish to connect and sync data with.
-
-== Screenshots ==
-
-1. The initial connection and authorization screen for Xero.
-2. The main settings page for mapping product/item details and tax accounts.
-3. A view of the successful sync log, showing the Xero Invoice ID.
 
 == Changelog ==
 

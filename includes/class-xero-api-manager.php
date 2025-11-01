@@ -17,22 +17,19 @@ class Xero_API_Manager {
         
         $raw_key = '';
         
-        // 1. Primary choice: Dedicated encryption key (Recommended)
         if ( defined( 'XERO_ENCRYPTION_KEY' ) ) {
             $raw_key = XERO_ENCRYPTION_KEY;
         } 
-        // 2. Secondary choice: Fallback to a WordPress security salt
+
         else if ( defined( 'AUTH_KEY' ) ) {
             $raw_key = AUTH_KEY;
         } 
-        // 3. Fallback: Hardcoded (Unsafe for Production)
+
         else {
             $raw_key = 'A_SECURE_32_BYTE_ENCRYPTION_KEY_1234'; 
             error_log('SECURITY ERROR: Xero API encryption key is hardcoded. Define XERO_ENCRYPTION_KEY or AUTH_KEY.');
         }
         
-        // Generate a 32-byte (256-bit) key from the raw key material using SHA-256 hash.
-        // This ensures the key is the correct length for aes-256-cbc.
         $this->encryption_key = substr( hash( 'sha256', $raw_key, true ), 0, 32 );
         
     }
@@ -168,7 +165,7 @@ class Xero_API_Manager {
                 'code'               => $code,
                 'redirect_uri'       => $redirect_uri,
                 'client_id'          => $client_id,
-                'code_verifier'      => $code_verifier, // PKCE Verifier
+                'code_verifier'      => $code_verifier, 
             ],
         ]);
 
@@ -387,7 +384,6 @@ class Xero_API_Manager {
     }
 
     /**
-     * === CORE SYNCHRONIZATION METHOD ===
      * Orchestrates the entire order synchronization process to Xero.
      * @param WC_Order $order The WooCommerce order object.
      * @return bool True on success, false on failure.
@@ -598,13 +594,13 @@ class Xero_API_Manager {
 
         $sku = $product->get_sku();
 
-        // 1. Try to find existing item
+        // Try to find existing item
         $xero_item = $this->get_xero_item_by_code( $sku, $access_token, $tenant_id );
         if ( $xero_item ) {
             return $xero_item['Code'];
         }
 
-        // 2. Create item if not found
+        // Create item if not found
         $new_xero_item = $this->create_xero_item( $product, $access_token, $tenant_id );
         if ( $new_xero_item ) {
             return $new_xero_item['Code'];
@@ -713,7 +709,7 @@ class Xero_API_Manager {
             }
         }
         error_log( 'XERO INVOICE PAYLOAD DEBUG: ' . print_r( $invoice_data['DeliveryAddress'], true ) );
-        // 2. Create Invoice
+        // Create Invoice
         $invoice_response = $this->xero_api_request( 'POST', 'Invoices', $access_token, $tenant_id, [ 'Invoices' => [ $invoice_data ] ] );
 
         if ( ! $invoice_response || empty( $invoice_response['Invoices'][0]['InvoiceID'] ) ) {
@@ -723,7 +719,6 @@ class Xero_API_Manager {
 
         $invoice_id = $invoice_response['Invoices'][0]['InvoiceID'];
         
-        // --- Payment Registration Logic ---
         
         $payment_method = $order->get_payment_method();
         $payment_mappings = get_option( 'xero_payment_mappings', [] );
